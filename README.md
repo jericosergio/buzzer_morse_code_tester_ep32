@@ -5,7 +5,14 @@ A simple Morse “keyer” for ESP32 that uses **two buttons** for `DOT` and `DA
 
 * **DOT** button → adds `.` on release (buzzer sounds while held)
 * **DASH** button → adds `-` on release (buzzer sounds while held)
-* **OK** button → **short press** commits the current `.-` sequence into a **letter**, **long press (≥2s)** clears the **text buffer**
+* **OK** (GPIO27):
+
+  * **Short press** → **commit** current `.-` as a **letter**
+  * **Triple short press** → **playback**:
+
+    * If you’re building a letter, plays that pattern
+    * Otherwise plays the **entire committed message** (e.g., “SOS”) with proper Morse timing
+  * **Long press (≥2s)** → **clear** text and current pattern
 
 Live status appears on a **128×64 SH1106 I²C OLED**, and events mirror to **Serial**.
 
@@ -16,12 +23,20 @@ Live status appears on a **128×64 SH1106 I²C OLED**, and events mirror to **Se
 
 ## Features
 
-* 3-button input: DOT, DASH, OK (commit/clear)
-* Buzzer **only** when DOT/DASH are pressed (silent otherwise)
-* Debounce + clean press/release handling
-* Optional **auto letter/word commit** based on silence gaps (3u/7u)
-* Buffer capped to avoid unlimited growth (shows ellipsis when trimmed)
-* OLED status: key states, current `.-` sequence, and recent decoded text
+* 3-button input with debounced press/release
+* **Minimal OLED UI** (no hints)
+
+  * Header indicates **PLAYING**
+  * Line 2 shows `u=<unit>ms` and **`jrcsrg`** when playing
+  * Current `Letter:` (when idle) or “PLAYING MSG…” (during playback)
+  * Text tail (auto-trim with leading “…”)
+* **Active-LOW** buzzer (silent by default)
+* Correct Morse timing:
+
+  * `.` = **1 unit** tone, `-` = **3 units** tone
+  * **1u** between parts of a letter, **3u** between letters, **7u** between words
+  * Repeats message with a **3u** loop gap (configurable)
+* Auto-trim text buffer to prevent RAM growth
 
 ---
 
@@ -175,49 +190,83 @@ const size_t OLED_TAIL_CHARS   = 40;  // show last N chars on the OLED line
 
 ## Usage
 
-1. Wire OLED, buttons, and buzzer as shown.
-2. Build & upload via PlatformIO.
-3. Open Serial Monitor at **115200**.
-4. Tap/hold DOT & DASH to build a `.-` sequence; press **OK** to commit to a letter.
-5. Long-press **OK** (≥2s) to clear the text.
-6. Watch the OLED for **key states**, **current sequence**, and the **decoded text tail** (shows `…` when older text is trimmed).
+1. Wire OLED, buttons, and buzzer per schematics above.
+2. Build & upload with PlatformIO; open Serial Monitor at **115200**.
+3. **Tap/hold DOT/DASH** to build a `.-` sequence; **release** to append (`.` or `-`).
+4. **OK short** commits the current sequence to a **letter**.
+5. **OK triple short**:
+
+   * If a letter is in progress → plays that **pattern**.
+   * Otherwise → plays the **entire committed text** (e.g., “SOS”), looping.
+6. **OK long (≥2s)** clears everything.
+7. Any button press **stops playback**.
+
+---
+
+## Configuration (in `main.cpp`)
+
+```cpp
+// Pins
+#define DOT_BTN_PIN    13
+#define DASH_BTN_PIN   14
+#define OK_BTN_PIN     27
+#define BUZZER_PIN     18
+
+// Buzzer polarity: 1 = active-LOW (LOW=ON), 0 = active-HIGH (HIGH=ON)
+#define BUZZER_ACTIVE_LOW 1
+
+// Morse timing
+uint16_t UNIT_MS = 120;          // 1 unit (dot)
+uint16_t LETTER_GAP_MS = 3 * 120;
+uint16_t WORD_GAP_MS   = 7 * 120;
+
+// Playback loop gap (between full message repeats)
+const uint16_t PLAY_LOOP_GAP_MS = 3 * 120;
+
+// Text buffer limits
+const size_t MAX_TEXT_LEN    = 120;
+const size_t OLED_TAIL_CHARS = 40;
+```
+
+> Want a slower/faster keyer? Change `UNIT_MS` (e.g., 100–150).
+> Want a longer pause between message repeats? Increase `PLAY_LOOP_GAP_MS` (e.g., `7 * 120`).
+
+---
+
+## OLED Layout (Minimal)
+
+* **Line 1**: `ESP32 Morse (3-btn)` or `ESP32 Morse (PLAYING)`
+* **Line 2**: `u=<ms>` and **`jrcsrg`** when playing
+* **Line 3**: `DOT/DASH` key states
+* **Line 4**: `Letter: .-` (idle) or `PLAYING MSG...` (playing)
+* **Line 5**: `Text:` tail (with leading `…` if trimmed)
 
 ---
 
 ## Troubleshooting
 
-* **Buzzer is ON constantly / inverted behavior**
-  → Set `#define BUZZER_ACTIVE_LOW 1` (active-LOW) or `0` (active-HIGH).
-  → Ensure the buzzer **I/O** is on **GPIO18**, not tied to 3V3.
+* **Play toggle ON but no sound**
 
-* **Boot chirp** (buzz right at reset)
-  → The code preloads the latch to keep it silent. If it still chirps, add a **10k pull-up** from **BUZZER I/O** to **3.3V**.
+  * The code won’t start playback if there’s no sequence. Make sure:
+
+    * You have an in-progress letter **or** committed text (e.g., commit `S`, `O`, `S`).
+  * Confirm **buzzer polarity**: set `BUZZER_ACTIVE_LOW` to `1` (LOW=ON).
+  * Ensure **BUZZER\_PIN = 18** is connected to the module **I/O**, not VCC.
+
+* **Buzzer constantly on**
+
+  * Invert `BUZZER_ACTIVE_LOW` (0 ↔ 1).
+  * Double-check wiring: the I/O pin should not be tied to 3V3.
+
+* **Boot chirp**
+
+  * The code preloads the pin to keep it HIGH before `pinMode(OUTPUT)`.
+  * If it still chirps, add **10k pull-up** from buzzer I/O to **3.3V**.
 
 * **OLED blank**
-  → Double-check SDA=21, SCL=22; try address **0x3C** vs **0x3D**.
 
-* **Buttons not responding**
-  → Confirm each button’s other leg goes to **GND** and `pinMode(..., INPUT_PULLUP)` is present.
+  * Check `SDA=21`, `SCL=22`. The sketch tries **0x3C**, then **0x3D**.
 
-* **Text grows too long**
-  → The buffer auto-trims to `MAX_TEXT_LEN`. Increase/decrease as desired.
-
----
-
-## Optional: 5V-only Buzzer Driver (quick sketch)
-
-If your module needs **5V** and doesn’t accept 3.3V logic safely, use an NPN (2N2222):
-
-```
-ESP32 GPIO18 --1k--> NPN Base
-NPN Emitter --------> GND
-NPN Collector ------> Buzzer I/O (or low-side of the module input)
-Buzzer VCC ---------> 5V
-Buzzer GND ---------> GND
-(Optionally, 10k from Base to GND as pulldown)
-```
-
-> Most active buzzers don’t require a flyback diode, but check your module.
 
 ---
 
@@ -247,10 +296,18 @@ SOFTWARE.
 
 ---
 
+## Changelog (recent)
+
+* **Triple-tap OK** now plays the **entire committed message** (letter-by-letter with proper gaps) if no letter is currently being built.
+* Playback engine fixed to avoid skipping first symbol after loop gaps.
+* Minimal OLED UI; shows **`jrcsrg`** only during playback.
+* Text buffer trimmed with visible leading `…` when older text is removed.
+
+
+---
 ## Credits
 
 * Adafruit **GFX** + **SH110X** for OLED support
 * PlatformIO + Arduino for smooth dev flow
 
----
 
